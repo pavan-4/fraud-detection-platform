@@ -1,0 +1,152 @@
+# docker-compose.yml
+# Starts: Kafka + Zookeeper + Schema Registry + Kafka UI
+# Airflow will be added in Layer 5
+#
+# HOW TO USE:
+#   Start:  docker-compose up -d
+#   Stop:   docker-compose down
+#   Logs:   docker-compose logs -f kafka
+#   UI:     http://localhost:8080  (Kafka UI — see topics + messages)
+
+version: '3.8'
+
+networks:
+  fraud_platform:
+    driver: bridge
+
+services:
+
+  # ── ZOOKEEPER ─────────────────────────────────────────────────────────────
+  # Kafka needs Zookeeper to coordinate the cluster.
+  # Think of it as the "manager" that keeps Kafka brokers in sync.
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: fraud_zookeeper
+    networks:
+      - fraud_platform
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── KAFKA BROKER ──────────────────────────────────────────────────────────
+  # The event streaming platform.
+  # Your transaction producer writes here → your Spark job reads from here.
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: fraud_kafka
+    networks:
+      - fraud_platform
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"       # Port your producer + Spark job connects to
+      - "9101:9101"       # JMX monitoring port
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+
+      # TWO listeners:
+      # PLAINTEXT       → used inside Docker network (container to container)
+      # PLAINTEXT_HOST  → used from your local machine (producer script)
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1     # 1 broker locally (3 in prod)
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'      # We create topics explicitly
+      KAFKA_LOG_RETENTION_HOURS: 48                 # Keep messages 48 hours
+      KAFKA_JMX_PORT: 9101
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ── SCHEMA REGISTRY ───────────────────────────────────────────────────────
+  # Stores and validates Avro schemas.
+  # Ensures producer and consumer always agree on message format.
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.5.0
+    container_name: fraud_schema_registry
+    networks:
+      - fraud_platform
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'kafka:29092'
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/subjects"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ── KAFKA TOPIC INIT ──────────────────────────────────────────────────────
+  # Creates our topics automatically when the stack starts.
+  # Runs once and exits — that's normal.
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: fraud_kafka_init
+    networks:
+      - fraud_platform
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "
+      echo 'Waiting for Kafka to be ready...'
+      kafka-topics --bootstrap-server kafka:29092 --list
+
+      echo 'Creating topic: raw.transactions'
+      kafka-topics --bootstrap-server kafka:29092 \
+        --create --if-not-exists \
+        --topic raw.transactions \
+        --partitions 3 \
+        --replication-factor 1 \
+        --config retention.ms=172800000
+
+      echo 'Creating topic: raw.transactions.dead_letter'
+      kafka-topics --bootstrap-server kafka:29092 \
+        --create --if-not-exists \
+        --topic raw.transactions.dead_letter \
+        --partitions 1 \
+        --replication-factor 1 \
+        --config retention.ms=604800000
+
+      echo 'Topics created successfully!'
+      kafka-topics --bootstrap-server kafka:29092 --list
+      "
+
+  # ── KAFKA UI ──────────────────────────────────────────────────────────────
+  # Visual dashboard to see topics, messages, consumer groups.
+  # Open http://localhost:8080 in your browser after starting.
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: fraud_kafka_ui
+    networks:
+      - fraud_platform
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: fraud-platform-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081

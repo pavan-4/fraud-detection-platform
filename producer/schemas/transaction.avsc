@@ -1,0 +1,92 @@
+{
+  "namespace": "com.fraudplatform.payments",
+  "type": "record",
+  "name": "TransactionEvent",
+  "doc": "A card payment transaction event published to raw.transactions Kafka topic",
+  "fields": [
+    {
+      "name": "transaction_id",
+      "type": "string",
+      "doc": "Unique UUID for this transaction"
+    },
+    {
+      "name": "card_id",
+      "type": "string",
+      "doc": "Card identifier (will be hashed in Silver layer for PII compliance)"
+    },
+    {
+      "name": "customer_id",
+      "type": "string",
+      "doc": "Customer account identifier"
+    },
+    {
+      "name": "merchant_id",
+      "type": "string",
+      "doc": "Merchant unique identifier"
+    },
+    {
+      "name": "merchant_name",
+      "type": "string",
+      "doc": "Human-readable merchant name"
+    },
+    {
+      "name": "merchant_category_code",
+      "type": "string",
+      "doc": "ISO 18245 MCC code e.g. 5411 = Grocery Stores"
+    },
+    {
+      "name": "amount_local",
+      "type": "double",
+      "doc": "Transaction amount in local currency"
+    },
+    {
+      "name": "currency_code",
+      "type": "string",
+      "doc": "ISO 4217 currency code e.g. EUR, GBP, USD"
+    },
+    {
+      "name": "amount_eur",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Amount converted to EUR (null if currency is already EUR)"
+    },
+    {
+      "name": "country_code",
+      "type": "string",
+      "doc": "ISO 3166-1 alpha-2 country code where transaction occurred"
+    },
+    {
+      "name": "terminal_type",
+      "type": {
+        "type": "enum",
+        "name": "TerminalType",
+        "symbols": ["POS", "ATM", "ONLINE", "CONTACTLESS"]
+      },
+      "doc": "Type of payment terminal used"
+    },
+    {
+      "name": "event_timestamp",
+      "type": "long",
+      "logicalType": "timestamp-millis",
+      "doc": "Unix timestamp in milliseconds when transaction occurred"
+    },
+    {
+      "name": "ip_address",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "IP address for ONLINE transactions only"
+    },
+    {
+      "name": "latitude",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "GPS latitude of terminal (null for ONLINE)"
+    },
+    {
+      "name": "longitude",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "GPS longitude of terminal (null for ONLINE)"
+    }
+  ]
+}
