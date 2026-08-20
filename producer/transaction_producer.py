@@ -6,22 +6,26 @@
 #   We fake it with realistic randomised data so we have something to process.
 #
 # HOW TO RUN:
-#   pip install kafka-python faker
+#   pip install confluent-kafka faker python-dotenv
 #   python producer/transaction_producer.py
 #
 # WHAT IT DOES:
-#   Sends ~1 transaction per second to Kafka topic: raw.transactions
+#   Sends ~2 transactions per second to Azure Event Hubs topic: raw.transactions
 #   Every ~20th transaction is intentionally "suspicious" (fraud simulation)
 #   Press Ctrl+C to stop
 
+import os
 import json
 import time
 import uuid
 import random
 import logging
 from datetime import datetime, timezone
-from kafka import KafkaProducer
+from dotenv import load_dotenv
+from confluent_kafka import Producer
 from faker import Faker
+
+load_dotenv()   # Reads .env file from project root
 
 # ── SETUP ─────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -33,14 +37,13 @@ logger = logging.getLogger(__name__)
 fake = Faker()
 
 # ── CONFIGURATION ─────────────────────────────────────────────────────────────
-KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"   # Local Docker Kafka
-TOPIC_NAME = "raw.transactions"
-TRANSACTIONS_PER_SECOND = 2                  # How fast to send events
-FRAUD_RATE = 0.05                            # 5% of transactions are suspicious
+EVENT_HUBS_CONNECTION_STRING = os.getenv("EVENT_HUBS_CONNECTION_STRING")
+EVENT_HUBS_NAMESPACE         = "fraud-platform-eh.servicebus.windows.net:9093"
+TOPIC_NAME                   = "raw.transactions"
+TRANSACTIONS_PER_SECOND      = 2        # How fast to send events
+FRAUD_RATE                   = 0.05     # 5% of transactions are suspicious
 
 # ── REFERENCE DATA ────────────────────────────────────────────────────────────
-# In production these come from databases. We hardcode small sets for the sim.
-
 MERCHANTS = [
     {"id": "M001", "name": "Tesco Dublin",         "mcc": "5411", "country": "IE", "lat": 53.3498, "lon": -6.2603},
     {"id": "M002", "name": "Penneys Grafton St",   "mcc": "5651", "country": "IE", "lat": 53.3418, "lon": -6.2610},
@@ -72,9 +75,6 @@ CARDS = [
     for i in range(1, 51)
 ]
 
-TERMINAL_TYPES = ["POS", "ATM", "ONLINE", "CONTACTLESS"]
-TERMINAL_WEIGHTS = [0.4, 0.1, 0.25, 0.25]   # CONTACTLESS and POS dominate
-
 
 # ── TRANSACTION GENERATOR ─────────────────────────────────────────────────────
 
@@ -86,7 +86,6 @@ def generate_normal_transaction() -> dict:
     amount_local = round(random.uniform(1.50, 350.00), 2)
     amount_eur = round(amount_local * FX_TO_EUR.get(currency, 1.0), 2)
 
-    # Terminal type logic: online merchants have ONLINE terminal
     if merchant["lat"] is None:
         terminal_type = "ONLINE"
         ip_address = fake.ipv4()
@@ -97,45 +96,42 @@ def generate_normal_transaction() -> dict:
             weights=[0.4, 0.1, 0.5]
         )[0]
         ip_address = None
-        lat = merchant["lat"] + random.uniform(-0.001, 0.001)   # Slight GPS noise
+        lat = merchant["lat"] + random.uniform(-0.001, 0.001)
         lon = merchant["lon"] + random.uniform(-0.001, 0.001)
 
     return {
-        "transaction_id":        str(uuid.uuid4()),
-        "card_id":               card["card_id"],
-        "customer_id":           card["customer_id"],
-        "merchant_id":           merchant["id"],
-        "merchant_name":         merchant["name"],
+        "transaction_id":         str(uuid.uuid4()),
+        "card_id":                card["card_id"],
+        "customer_id":            card["customer_id"],
+        "merchant_id":            merchant["id"],
+        "merchant_name":          merchant["name"],
         "merchant_category_code": merchant["mcc"],
-        "amount_local":          amount_local,
-        "currency_code":         currency,
-        "amount_eur":            amount_eur if currency != "EUR" else None,
-        "country_code":          merchant["country"],
-        "terminal_type":         terminal_type,
-        "event_timestamp":       int(datetime.now(timezone.utc).timestamp() * 1000),
-        "ip_address":            ip_address,
-        "latitude":              lat,
-        "longitude":             lon,
+        "amount_local":           amount_local,
+        "currency_code":          currency,
+        "amount_eur":             amount_eur if currency != "EUR" else None,
+        "country_code":           merchant["country"],
+        "terminal_type":          terminal_type,
+        "event_timestamp":        int(datetime.now(timezone.utc).timestamp() * 1000),
+        "ip_address":             ip_address,
+        "latitude":               lat,
+        "longitude":              lon,
     }
 
 
 def generate_suspicious_transaction() -> dict:
-    """
-    Generate a transaction with fraud signals baked in.
-    These are the patterns our Silver job + ML model should catch.
-    """
+    """Generate a transaction with fraud signals baked in."""
     card = random.choice(CARDS)
     fraud_type = random.choice([
-        "high_amount",        # Unusually large amount
-        "foreign_country",    # Card used in unexpected country
-        "rapid_succession",   # Sent immediately after a normal txn
-        "suspicious_mcc",     # High-risk merchant category
+        "high_amount",
+        "foreign_country",
+        "rapid_succession",
+        "suspicious_mcc",
     ])
 
     txn = generate_normal_transaction()
     txn["card_id"] = card["card_id"]
     txn["customer_id"] = card["customer_id"]
-    txn["transaction_id"] = str(uuid.uuid4())   # New unique ID
+    txn["transaction_id"] = str(uuid.uuid4())
 
     if fraud_type == "high_amount":
         txn["amount_local"] = round(random.uniform(2000, 9999), 2)
@@ -150,48 +146,61 @@ def generate_suspicious_transaction() -> dict:
 
     elif fraud_type == "suspicious_mcc":
         txn["merchant_category_code"] = random.choice(["7995", "5933", "6051"])
-        # 7995 = Gambling, 5933 = Pawn Shops, 6051 = Non-financial institutions
 
-    # Log the fraud type for our own debugging
-    txn["_fraud_simulation_type"] = fraud_type   # Will be visible in Kafka UI
-
+    txn["_fraud_simulation_type"] = fraud_type
     return txn
 
 
-# ── KAFKA PRODUCER ────────────────────────────────────────────────────────────
+# ── CONFLUENT KAFKA PRODUCER (Azure Event Hubs) ───────────────────────────────
 
-def create_producer() -> KafkaProducer:
-    """Create and return a Kafka producer with JSON serialisation."""
-    return KafkaProducer(
-        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-        value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-        key_serializer=lambda k: k.encode("utf-8"),
-        # Reliability settings
-        acks="all",                  # Wait for all replicas to acknowledge
-        retries=3,
-        retry_backoff_ms=500,
-    )
+def create_producer() -> Producer:
+    """
+    Create and return a confluent-kafka Producer connected to Azure Event Hubs.
+
+    confluent-kafka is built on librdkafka which has first-class support for
+    Azure Event Hubs SASL_SSL authentication — unlike kafka-python which has
+    a known SASL handshake incompatibility with Event Hubs.
+    """
+    if not EVENT_HUBS_CONNECTION_STRING:
+        raise ValueError(
+            "EVENT_HUBS_CONNECTION_STRING not found. "
+            "Make sure .env file exists in project root."
+        )
+
+    conf = {
+        "bootstrap.servers":  EVENT_HUBS_NAMESPACE,
+        "security.protocol":  "SASL_SSL",
+        "sasl.mechanism":     "PLAIN",
+        "sasl.username":      "$ConnectionString",
+        "sasl.password":      EVENT_HUBS_CONNECTION_STRING,
+        "client.id":          "fraud-platform-producer",
+        "acks":               "all",
+        "retries":            3,
+        "retry.backoff.ms":   500,
+    }
+    return Producer(conf)
 
 
-def on_send_success(record_metadata):
-    """Callback — called when message is successfully delivered."""
-    logger.info(
-        f"✅ Sent → topic={record_metadata.topic} "
-        f"partition={record_metadata.partition} "
-        f"offset={record_metadata.offset}"
-    )
-
-
-def on_send_error(exception):
-    """Callback — called when message delivery fails."""
-    logger.error(f"❌ Failed to send message: {exception}")
+def delivery_callback(err, msg):
+    """
+    Called once per message when delivery is confirmed or fails.
+    confluent-kafka uses a single callback with err=None on success.
+    """
+    if err:
+        logger.error(f"❌ Failed to send message: {err}")
+    else:
+        logger.info(
+            f"✅ Sent → topic={msg.topic()} "
+            f"partition={msg.partition()} "
+            f"offset={msg.offset()}"
+        )
 
 
 # ── MAIN LOOP ─────────────────────────────────────────────────────────────────
 
 def main():
     logger.info("🚀 Starting Fraud Detection Transaction Producer")
-    logger.info(f"   Kafka:  {KAFKA_BOOTSTRAP_SERVERS}")
+    logger.info(f"   Kafka:  {EVENT_HUBS_NAMESPACE}")
     logger.info(f"   Topic:  {TOPIC_NAME}")
     logger.info(f"   Rate:   {TRANSACTIONS_PER_SECOND} txn/sec")
     logger.info(f"   Fraud:  {FRAUD_RATE * 100:.0f}% of transactions are suspicious")
@@ -203,7 +212,6 @@ def main():
 
     try:
         while True:
-            # Decide: normal or suspicious transaction?
             is_fraud = random.random() < FRAUD_RATE
 
             if is_fraud:
@@ -223,32 +231,34 @@ def main():
                     f"amount=€{txn['amount_local']:.2f}"
                 )
 
-            # Send to Kafka
-            # Key = card_id ensures all transactions for one card
-            # go to the same partition (important for ordering guarantees)
-            producer.send(
+            # Produce message to Event Hubs
+            # Key = card_id ensures ordering per card within a partition
+            producer.produce(
                 topic=TOPIC_NAME,
-                key=txn["card_id"],
-                value=txn
-            ).add_callback(on_send_success).add_errback(on_send_error)
+                key=txn["card_id"].encode("utf-8"),
+                value=json.dumps(txn).encode("utf-8"),
+                callback=delivery_callback
+            )
+
+            # confluent-kafka buffers messages — poll() triggers callbacks
+            # and flushes the internal queue without blocking
+            producer.poll(0)
 
             total_sent += 1
 
-            # Print summary every 20 transactions
             if total_sent % 20 == 0:
                 logger.info(
                     f"\n📊 Summary: {total_sent} sent | "
                     f"{total_fraud} suspicious ({total_fraud/total_sent*100:.1f}%)\n"
                 )
 
-            # Control the rate
             time.sleep(1 / TRANSACTIONS_PER_SECOND)
 
     except KeyboardInterrupt:
         logger.info(f"\n⏹️  Stopped. Total sent: {total_sent} | Suspicious: {total_fraud}")
     finally:
-        producer.flush()    # Ensure all buffered messages are sent
-        producer.close()
+        logger.info("Flushing remaining messages...")
+        producer.flush()    # Block until all buffered messages are delivered
         logger.info("Producer closed cleanly.")
 
 
