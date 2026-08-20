@@ -125,7 +125,8 @@ fraud-detection-platform/
 
 ## ⚠️ Known Issues / Blockers
 _None yet — add here as they come up_
-
+- Azure Event Hubs Basic tier does NOT support Kafka protocol — must use Standard tier
+- kafka-python-ng has SASL incompatibility with Event Hubs — use confluent-kafka instead
 ---
 
 ## 💬 How to Start a New Session
