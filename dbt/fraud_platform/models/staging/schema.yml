@@ -1,0 +1,53 @@
+version: 2
+
+models:
+  - name: stg_transactions
+    description: "Cleaned Bronze transactions — source of truth for all downstream models"
+    columns:
+      - name: transaction_id
+        description: "Unique identifier for each transaction"
+        tests:
+          - unique
+          - not_null
+
+      - name: card_id
+        tests:
+          - not_null
+
+      - name: amount_local
+        description: "Transaction amount in local currency"
+        tests:
+          - not_null
+
+      - name: country_code
+        tests:
+          - not_null
+
+      - name: terminal_type
+        tests:
+          - accepted_values:
+              values: ['POS', 'ATM', 'CONTACTLESS', 'ONLINE']
+
+  - name: int_fraud_scored
+    description: "Transactions enriched with fraud signals and risk scores"
+    columns:
+      - name: risk_score
+        description: "Weighted fraud risk score 0-100"
+        tests:
+          - not_null
+
+      - name: risk_label
+        tests:
+          - accepted_values:
+              values: ['LOW', 'MEDIUM', 'HIGH']
+
+  - name: mart_fraud_alerts
+    description: "HIGH risk transactions only — fraud analyst queue"
+    columns:
+      - name: transaction_id
+        tests:
+          - unique
+          - not_null
+      - name: alert_reason
+        tests:
+          - not_null
