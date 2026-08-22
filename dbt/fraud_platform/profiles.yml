@@ -13,7 +13,7 @@ fraud_platform:
     # ── LOCAL DEVELOPMENT ─────────────────────────────────────────────────────
     dev:
       type: databricks
-      host: https://dbc-228421d6-53f1.cloud.databricks.com
+      host: dbc-228421d6-53f1.cloud.databricks.com
       http_path: /sql/1.0/warehouses/23fe4d8938d9c5a5
       token: "{{ env_var('DBT_TOKEN', '') }}"   # set via ~/.dbt/profiles.yml or env
       schema: fraud_platform
@@ -23,7 +23,7 @@ fraud_platform:
     # ── CI / GITHUB ACTIONS ───────────────────────────────────────────────────
     ci:
       type: databricks
-      host: https://dbc-228421d6-53f1.cloud.databricks.com
+      host: dbc-228421d6-53f1.cloud.databricks.com
       http_path: /sql/1.0/warehouses/23fe4d8938d9c5a5
       token: "{{ env_var('DATABRICKS_TOKEN') }}"   # injected by GitHub Actions secret
       schema: fraud_platform
