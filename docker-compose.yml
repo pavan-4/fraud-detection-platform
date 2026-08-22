@@ -1,12 +1,12 @@
 # docker-compose.yml
-# Starts: Kafka + Zookeeper + Schema Registry + Kafka UI
-# Airflow will be added in Layer 5
+# Starts: Kafka + Zookeeper + Schema Registry + Kafka UI + Airflow
 #
 # HOW TO USE:
-#   Start:  docker-compose up -d
-#   Stop:   docker-compose down
-#   Logs:   docker-compose logs -f kafka
-#   UI:     http://localhost:8080  (Kafka UI — see topics + messages)
+#   Start all:     docker-compose up -d
+#   Airflow only:  docker-compose up -d postgres airflow-init airflow-webserver airflow-scheduler
+#   Stop:          docker-compose down
+#   Airflow UI:    http://localhost:8088  (admin / admin)
+#   Kafka UI:      http://localhost:8080
 
 version: '3.8'
 
@@ -14,11 +14,34 @@ networks:
   fraud_platform:
     driver: bridge
 
+volumes:
+  postgres_data:
+
+x-airflow-common: &airflow-common
+  build: .                          # Use our Dockerfile (pre-installs providers + dbt)
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
+    # Databricks connection — matches what we stored in Databricks Secrets
+    AIRFLOW_CONN_DATABRICKS_DEFAULT: '{"conn_type": "databricks", "host": "https://dbc-228421d6-53f1.cloud.databricks.com", "extra": {"token": "${DATABRICKS_TOKEN}"}}'
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./dbt/fraud_platform:/opt/dbt                 # dbt project mounted into Airflow
+    - ~/.dbt:/home/airflow/.dbt                     # dbt profiles.yml (has your token)
+  depends_on:
+    postgres:
+      condition: service_healthy
+  networks:
+    - fraud_platform
+
 services:
 
   # ── ZOOKEEPER ─────────────────────────────────────────────────────────────
-  # Kafka needs Zookeeper to coordinate the cluster.
-  # Think of it as the "manager" that keeps Kafka brokers in sync.
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: fraud_zookeeper
@@ -36,8 +59,6 @@ services:
       retries: 5
 
   # ── KAFKA BROKER ──────────────────────────────────────────────────────────
-  # The event streaming platform.
-  # Your transaction producer writes here → your Spark job reads from here.
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     container_name: fraud_kafka
@@ -47,25 +68,20 @@ services:
       zookeeper:
         condition: service_healthy
     ports:
-      - "9092:9092"       # Port your producer + Spark job connects to
-      - "9101:9101"       # JMX monitoring port
+      - "9092:9092"
+      - "9101:9101"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
-
-      # TWO listeners:
-      # PLAINTEXT       → used inside Docker network (container to container)
-      # PLAINTEXT_HOST  → used from your local machine (producer script)
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
-
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1     # 1 broker locally (3 in prod)
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'      # We create topics explicitly
-      KAFKA_LOG_RETENTION_HOURS: 48                 # Keep messages 48 hours
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_LOG_RETENTION_HOURS: 48
       KAFKA_JMX_PORT: 9101
     healthcheck:
       test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
@@ -74,8 +90,6 @@ services:
       retries: 10
 
   # ── SCHEMA REGISTRY ───────────────────────────────────────────────────────
-  # Stores and validates Avro schemas.
-  # Ensures producer and consumer always agree on message format.
   schema-registry:
     image: confluentinc/cp-schema-registry:7.5.0
     container_name: fraud_schema_registry
@@ -97,8 +111,6 @@ services:
       retries: 10
 
   # ── KAFKA TOPIC INIT ──────────────────────────────────────────────────────
-  # Creates our topics automatically when the stack starts.
-  # Runs once and exits — that's normal.
   kafka-init:
     image: confluentinc/cp-kafka:7.5.0
     container_name: fraud_kafka_init
@@ -106,35 +118,10 @@ services:
       - kafka
     entrypoint: ["/bin/sh", "-c"]
     command: "sleep 15 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic raw.transactions --partitions 3 --replication-factor 1 --config retention.ms=172800000 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic raw.transactions.dead_letter --partitions 1 --replication-factor 1 --config retention.ms=604800000 && echo 'Topics created successfully!' && kafka-topics --bootstrap-server kafka:29092 --list"
-
-    
-      "
-      echo 'Waiting for Kafka to be ready...'
-      kafka-topics --bootstrap-server kafka:29092 --list
-
-      echo 'Creating topic: raw.transactions'
-      kafka-topics --bootstrap-server kafka:29092 \
-        --create --if-not-exists \
-        --topic raw.transactions \
-        --partitions 3 \
-        --replication-factor 1 \
-        --config retention.ms=172800000
-
-      echo 'Creating topic: raw.transactions.dead_letter'
-      kafka-topics --bootstrap-server kafka:29092 \
-        --create --if-not-exists \
-        --topic raw.transactions.dead_letter \
-        --partitions 1 \
-        --replication-factor 1 \
-        --config retention.ms=604800000
-
-      echo 'Topics created successfully!'
-      kafka-topics --bootstrap-server kafka:29092 --list
-      "
+    networks:
+      - fraud_platform
 
   # ── KAFKA UI ──────────────────────────────────────────────────────────────
-  # Visual dashboard to see topics, messages, consumer groups.
-  # Open http://localhost:8080 in your browser after starting.
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: fraud_kafka_ui
@@ -149,3 +136,62 @@ services:
       KAFKA_CLUSTERS_0_NAME: fraud-platform-local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
       KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+
+  # ── POSTGRESQL (Airflow metadata database) ────────────────────────────────
+  postgres:
+    image: postgres:15
+    container_name: fraud_postgres
+    networks:
+      - fraud_platform
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── AIRFLOW INIT (runs once to set up DB + create admin user) ────────────
+  airflow-init:
+    <<: *airflow-common
+    container_name: fraud_airflow_init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username admin \
+          --firstname Pavan \
+          --lastname Kumar \
+          --role Admin \
+          --email pavankumar.ga14@gmail.com \
+          --password admin
+        echo "Airflow initialised"
+
+  # ── AIRFLOW WEBSERVER (UI at http://localhost:8088) ───────────────────────
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: fraud_airflow_webserver
+    command: webserver
+    ports:
+      - "8088:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+  # ── AIRFLOW SCHEDULER (triggers DAG tasks on schedule) ────────────────────
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: fraud_airflow_scheduler
+    command: scheduler
+    restart: always
