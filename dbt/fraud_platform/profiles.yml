@@ -1,0 +1,31 @@
+# dbt/fraud_platform/profiles.yml
+#
+# TWO targets:
+#   dev  → reads token from ~/.dbt/profiles.yml on your local machine (existing setup)
+#   ci   → reads token from DATABRICKS_TOKEN environment variable (GitHub Actions)
+#
+# The CI workflow uses: dbt test --profiles-dir . --target ci
+
+fraud_platform:
+  target: dev
+  outputs:
+
+    # ── LOCAL DEVELOPMENT ─────────────────────────────────────────────────────
+    dev:
+      type: databricks
+      host: https://dbc-228421d6-53f1.cloud.databricks.com
+      http_path: /sql/1.0/warehouses/23fe4d8938d9c5a5
+      token: "{{ env_var('DBT_TOKEN', '') }}"   # set via ~/.dbt/profiles.yml or env
+      schema: fraud_platform
+      catalog: workspace
+      threads: 4
+
+    # ── CI / GITHUB ACTIONS ───────────────────────────────────────────────────
+    ci:
+      type: databricks
+      host: https://dbc-228421d6-53f1.cloud.databricks.com
+      http_path: /sql/1.0/warehouses/23fe4d8938d9c5a5
+      token: "{{ env_var('DATABRICKS_TOKEN') }}"   # injected by GitHub Actions secret
+      schema: fraud_platform
+      catalog: workspace
+      threads: 4

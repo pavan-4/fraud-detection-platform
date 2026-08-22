@@ -1,0 +1,45 @@
+# .github/workflows/ci_dbt_tests.yml
+#
+# PURPOSE:
+#   Runs all 11 dbt data quality tests automatically on every push or PR.
+#   If any test fails → the pipeline is blocked and the PR cannot merge.
+#   If all pass → green checkmark ✅ appears on the PR.
+#
+# SECRETS REQUIRED (set in GitHub → Settings → Secrets → Actions):
+#   DATABRICKS_TOKEN  → your Databricks personal access token
+
+name: dbt CI — Data Quality Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'dbt/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'dbt/**'
+
+jobs:
+  dbt-test:
+    name: Run dbt tests against Databricks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dbt-databricks
+        run: pip install dbt-databricks==1.7.14
+
+      - name: Run dbt tests
+        env:
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          cd dbt/fraud_platform
+          dbt test --profiles-dir . --target ci
