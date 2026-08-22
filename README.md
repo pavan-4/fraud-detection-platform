@@ -71,6 +71,8 @@ flowchart LR
 
 ---
 
+![Airflow DAG — all 5 tasks green](assets/airflow_dag.png)
+
 ## Tech Stack
 
 | Layer | Tool | Notes |
