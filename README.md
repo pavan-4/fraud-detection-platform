@@ -70,8 +70,10 @@ flowchart LR
 ```
 
 ---
-
+**DAG**
 ![Airflow DAG — all 5 tasks green](assets/airflow_dag.png)
+
+**Sample fraud alerts output:** [`assets/sample_alerts.csv`](assets/sample_alerts.csv)
 
 ## Tech Stack
 
