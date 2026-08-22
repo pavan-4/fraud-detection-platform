@@ -16,126 +16,201 @@
 
 ## 🎯 Project Goal
 Build an end-to-end real-time fraud detection data pipeline that:
-- Ingests fake card transaction events via Kafka
-- Processes them with PySpark Structured Streaming
-- Stores data in Delta Lake (Bronze / Silver / Gold medallion)
+- Ingests fake card transaction events via Azure Event Hubs (Kafka-compatible)
+- Processes them with PySpark Structured Streaming on Databricks
+- Stores data in Delta Lake (Bronze / Silver / Gold medallion) via Unity Catalog
 - Transforms with dbt models (staging → intermediate → fraud mart → PSD2 report)
 - Orchestrates with Apache Airflow
 - Deploys infra with Terraform + GitHub Actions CI/CD
 
 ---
 
-## 🛠️ Fixed Tech Stack (DO NOT suggest alternatives)
-| Layer        | Tool                        | Where it runs         |
-|-------------|-----------------------------|-----------------------|
-| Streaming    | Apache Kafka                | Local Docker          |
-| Processing   | PySpark Structured Streaming| Databricks Community Edition |
-| Storage      | Delta Lake                  | Databricks CE (DBFS)  |
-| Transform    | dbt Core (open source)      | Databricks CE         |
-| Orchestration| Apache Airflow              | Local Docker          |
-| CI/CD        | GitHub Actions              | GitHub (free)         |
-| IaC          | Terraform                   | Local                 |
-| Language     | Python 3.10+                | Everywhere            |
-| Cost         | €0 — fully free             |                       |
+## 🛠️ Fixed Tech Stack
+| Layer         | Tool                          | Where it runs              |
+|--------------|-------------------------------|----------------------------|
+| Streaming     | Azure Event Hubs (Kafka API)  | Azure (Standard tier)      |
+| Processing    | PySpark Structured Streaming  | Databricks Free Edition    |
+| Storage       | Delta Lake + Unity Catalog    | Databricks (serverless)    |
+| Transform     | dbt Core (open source)        | Databricks                 |
+| Orchestration | Apache Airflow                | Local Docker               |
+| CI/CD         | GitHub Actions                | GitHub (free)              |
+| IaC           | Terraform                     | Local                      |
+| Language      | Python 3.10+                  | Everywhere                 |
 
 ---
 
-## 📁 Project Structure (Fixed — do not change)
+## 📁 Project Structure
 ```
 fraud-detection-platform/
-├── MEMORY.md                  ← This file
-├── DECISIONS.md               ← Key architectural decisions
-├── README.md                  ← Progress tracker + setup guide
-├── docker-compose.yml         ← Kafka + Zookeeper + Schema Registry + Kafka UI + Airflow
+├── MEMORY.md                        ← This file (gitignored — NEVER commit)
+├── DECISIONS.md
+├── README.md
+├── Dockerfile                       ← Custom Airflow image (pre-installs providers + dbt)
+├── docker-compose.yml               ← Kafka + Airflow + Postgres
 ├── producer/
-│   ├── transaction_producer.py   ← Fake card transaction event generator
-│   └── schemas/
-│       └── transaction.avsc      ← Avro schema for transaction events
-├── spark_jobs/
-│   ├── bronze_ingestion.py       ← Kafka → Delta Lake Bronze
-│   ├── silver_enrichment.py      ← Bronze → Silver (features + enrichment)
-│   └── utils/
-│       └── spark_session.py      ← Shared SparkSession factory
+│   └── transaction_producer.py      ← confluent-kafka, sends to Azure Event Hubs
+├── databricks/                      ← Notebooks committed to GitHub as .ipynb
+│   ├── bronze_ingestion.ipynb
+│   ├── silver_enrichment.ipynb
+│   └── gold_fraud_alerts.ipynb
 ├── dbt/
-│   ├── dbt_project.yml
-│   ├── profiles.yml
-│   ├── models/
-│   │   ├── staging/
-│   │   │   ├── stg_transactions.sql
-│   │   │   ├── stg_customers.sql
-│   │   │   └── schema.yml
-│   │   ├── intermediate/
-│   │   │   ├── int_transaction_enriched.sql
-│   │   │   └── int_fraud_scored.sql
-│   │   └── marts/
-│   │       ├── mart_fraud_daily_summary.sql
-│   │       └── mart_regulatory_psd2.sql
-│   └── tests/
-│       └── custom_fraud_rate_anomaly.sql
+│   └── fraud_platform/
+│       ├── profiles.yml             ← dev + ci targets (ci reads DATABRICKS_TOKEN env var)
+│       ├── models/staging/stg_transactions.sql
+│       ├── models/intermediate/int_fraud_scored.sql
+│       ├── models/marts/mart_fraud_alerts.sql
+│       └── models/staging/schema.yml  ← 11 data quality tests
 ├── airflow/
 │   └── dags/
 │       └── fraud_platform_pipeline.py
-├── terraform/
-│   ├── main.tf
-│   ├── kafka_cluster.tf
-│   ├── variables.tf
-│   └── outputs.tf
-└── .github/
-    └── workflows/
-        ├── ci_dbt_tests.yml
-        └── cd_deploy_infra.yml
+├── terraform/                       ← Terraform IaC (NEXT)
+└── .github/workflows/
+    └── ci_dbt_tests.yml             ← GitHub Actions CI (COMPLETE)
 ```
 
 ---
 
-## 🔒 Fixed Decisions (DO NOT change these — see DECISIONS.md for reasons)
-- Kafka topic name: `raw.transactions`
-- Dead-letter topic: `raw.transactions.dead_letter`
-- Delta Lake paths:
-  - Bronze: `/FileStore/fraud-platform/bronze/transactions`
-  - Silver: `/FileStore/fraud-platform/silver/transactions`
-  - Gold:   `/FileStore/fraud-platform/gold/`
-  - Checkpoints: `/FileStore/fraud-platform/checkpoints/`
-- Transaction schema fields: transaction_id, card_id, customer_id, merchant_id, merchant_name, merchant_category_code, amount_local, currency_code, amount_eur, country_code, terminal_type, event_timestamp, ip_address, latitude, longitude
-- Avro schema namespace: `com.fraudplatform.payments`
-- Kafka bootstrap: `localhost:9092` (local Docker)
-- Databricks CE cluster: single node, DBR 14.3 LTS
+## 🔒 Fixed Decisions
+
+### Azure Event Hubs
+- Namespace: fraud-platform-eh.servicebus.windows.net:9093
+- Topics: raw.transactions (3 partitions), raw.transactions.dead-letter (1 partition)
+- Tier: Standard (Basic does NOT support Kafka protocol)
+- Auth: SASL_SSL + PLAIN, username="$ConnectionString"
+
+### Databricks
+- Workspace URL: https://dbc-228421d6-53f1.cloud.databricks.com
+- Compute: Serverless only (Free Edition does NOT support classic clusters)
+- Catalog: workspace (not main)
+- Secrets scope: fraud-platform, key: event-hubs-connection-string
+- Access: dbutils.secrets.get("fraud-platform", "event-hubs-connection-string")
+- CLI config: C:\Users\Pavan\.databrickscfg
+- Notebook paths in workspace: /Users/pavankumar.ga14@gmail.com/bronze_ingestion etc.
+
+### Unity Catalog Storage Paths
+- Volume:      workspace.fraud_platform.data
+- Bronze:      /Volumes/workspace/fraud_platform/data/bronze/transactions
+- Silver:      /Volumes/workspace/fraud_platform/data/silver/transactions
+- Gold:        /Volumes/workspace/fraud_platform/data/gold/
+- Checkpoint:  /Volumes/workspace/fraud_platform/data/checkpoints/bronze
+
+### Kafka / Streaming
+- Topic: raw.transactions
+- Producer key: card_id (ordering per card within partition)
+- Rate: 2 txns/sec, 5% fraud rate
+- Fraud types: high_amount, foreign_country, rapid_succession, suspicious_mcc
+
+### Transaction Schema Fields
+transaction_id, card_id, customer_id, merchant_id, merchant_name,
+merchant_category_code, amount_local, currency_code, amount_eur,
+country_code, terminal_type, event_timestamp, ip_address, latitude, longitude,
+_fraud_simulation_type
+
+### Airflow
+- URL: http://localhost:8088 (admin / admin)
+- Databricks connection: Admin → Connections → databricks_default
+  - Connection Type: Databricks
+  - Host: https://dbc-228421d6-53f1.cloud.databricks.com
+  - Password: <databricks token>  (NOT in Extra — use Password field)
+- Start command: docker-compose up -d postgres airflow-init airflow-webserver airflow-scheduler
+- DATABRICKS_TOKEN must be set: $env:DATABRICKS_TOKEN="token"
+
+### GitHub Actions CI
+- File: .github/workflows/ci_dbt_tests.yml
+- Triggers: push or PR to main when dbt/** files change
+- Runs: dbt test --profiles-dir . --target ci
+- Secret needed in GitHub: DATABRICKS_TOKEN
+- profiles.yml ci target: host WITHOUT https:// prefix (critical gotcha)
+- CI runs in ~50 seconds, all 11 dbt tests pass ✅
 
 ---
 
 ## ✅ Progress Tracker
-- [✅] Layer 1 — Kafka local environment + transaction producer
-- [ ] Layer 2 — PySpark Bronze job (Kafka → Delta Lake)
-- [ ] Layer 3 — PySpark Silver job (enrichment + rolling features)
-- [ ] Layer 4 — dbt models (staging → intermediate → marts)
-- [ ] Layer 5 — Airflow DAG (orchestration)
-- [ ] Layer 6 — GitHub Actions CI/CD + portfolio polish
+- [✅] Layer 1 — Kafka producer + Azure Event Hubs
+- [✅] Layer 2 — Bronze / Silver / Gold medallion on Databricks
+- [✅] Layer 3 — dbt models (stg → int → mart, 11 tests passing)
+- [✅] Layer 4 — Airflow DAG (all 5 tasks green, end-to-end pipeline running)
+- [✅] Layer 5 — GitHub Actions CI/CD (dbt tests auto-run on every push)
+- [ ] Layer 6 — Terraform (IaC for Azure Event Hubs)  ← NEXT
+- [ ] Layer 7 — README polish + CI badge (portfolio finish)
 
-**Current layer: PySpark Bronze job (Kafka → Delta Lake)**
-**Last completed: Layer 1 — Kafka + Transaction Producer ✅**
-
----
-
-## 📝 Session Log (update after every session)
-| Date | Layer | What we did | Where we stopped |
-|------|-------|-------------|-----------------|
-| 2026-08-19 | Layer 1 | Fixed kafka-init bug (multiline command), fixed Python 3.12 kafka-python-ng issue, producer sending live transactions | Ready for Layer 2 — PySpark Bronze on Databricks |
+**Current layer: Layer 6 — Terraform IaC**
 
 ---
 
-## ⚠️ Known Issues / Blockers
-_None yet — add here as they come up_
-- Azure Event Hubs Basic tier does NOT support Kafka protocol — must use Standard tier
-- kafka-python-ng has SASL incompatibility with Event Hubs — use confluent-kafka instead
+## 📝 Layer 3 — What Was Built (COMPLETE)
+
+### dbt Models (dbt/fraud_platform/)
+- stg_transactions.sql — cleans Bronze table, casts types, filters nulls
+- int_fraud_scored.sql — computes all 4 fraud signals + risk_score (0-100) + risk_label
+- mart_fraud_alerts.sql — materialized as TABLE, HIGH-risk txns only + alert_reason string
+- schema.yml — 11 data quality tests (unique, not_null, accepted_values)
+- All 3 models run: PASS=3, WARN=0, ERROR=0
+- All 11 tests pass: PASS=11, WARN=0, ERROR=0, SKIP=0
+
+### Key gotchas
+- Unity Catalog table names with dots need backticks: `bronze_transactions`
+- RANGE BETWEEN syntax: use PRECEDING not CLOSED
+- Tables must be registered via saveAsTable() before dbt can see them
+- dbt_project.yml warned about unused example config — harmless
+
+---
+
+## 📝 Layer 4 — What Was Built (COMPLETE)
+
+### Airflow Setup
+- Custom Dockerfile extends apache/airflow:2.9.0, pre-installs providers + dbt
+- docker-compose.yml: postgres + airflow-init + airflow-webserver + airflow-scheduler
+- DAG: fraud_platform_pipeline, schedule */5 * * * * (every 5 min)
+- 5 tasks: bronze_ingestion → silver_enrichment → gold_fraud_alerts → dbt_run → dbt_test
+
+### Key gotchas
+- Use Dockerfile + build: . instead of _PIP_ADDITIONAL_REQUIREMENTS (dbt-databricks conflicts)
+- Databricks Free Edition: serverless only — DatabricksSubmitRunOperator needs multi-task format:
+  json={"run_name": "...", "tasks": [{"task_key": "...", "notebook_task": {...}}], "queue": {"enabled": True}}
+- Token must go in Password field of Airflow connection, NOT in Extra JSON
+- Notebook paths in Airflow: /Users/pavankumar.ga14@gmail.com/bronze_ingestion (no subfolder)
+- First run: webserver takes 3-5 min to build image
+
+---
+
+## 📝 Layer 5 — What Was Built (COMPLETE)
+
+### GitHub Actions CI (.github/workflows/ci_dbt_tests.yml)
+- Triggers on push/PR to main when any dbt/** file changes
+- Installs dbt-databricks==1.7.14 on ubuntu-latest
+- Runs: cd dbt/fraud_platform && dbt test --profiles-dir . --target ci
+- DATABRICKS_TOKEN injected from GitHub Secrets → profiles.yml ci target
+- All 11 dbt tests pass in ~50 seconds ✅
+
+### profiles.yml (dbt/fraud_platform/profiles.yml)
+- Two targets: dev (local, reads DBT_TOKEN env var) and ci (GitHub Actions)
+- CRITICAL: host must NOT include https:// — use bare hostname only
+  ✅ host: dbc-228421d6-53f1.cloud.databricks.com
+  ❌ host: https://dbc-228421d6-53f1.cloud.databricks.com  ← breaks DNS
+
+### Key gotchas
+- Remove https:// from host in profiles.yml — dbt-databricks parses it as the hostname itself
+- GitHub Secret name must exactly match: DATABRICKS_TOKEN
+
+---
+
+## ⚠️ Known Issues / Gotchas
+- kafka-python-ng SASL incompatible with Event Hubs → use confluent-kafka
+- Databricks serverless: use kafkashaded.org.apache.kafka prefix in SASL_JAAS
+- Databricks serverless: ProcessingTime trigger not supported → use AvailableNow
+- DBFS root (/FileStore/) disabled → use Unity Catalog Volumes
+- Databricks catalog is workspace (not main)
+- Unity Catalog registered table is a STATIC snapshot — live row counts use Volume path
+- MEMORY.md gitignored — never commit
+- .env gitignored — never commit (contains EVENT_HUBS_CONNECTION_STRING)
+
 ---
 
 ## 💬 How to Start a New Session
-Paste this exact message at the top of a new Claude conversation:
-
 ```
 I'm building a fraud detection pipeline with Claude.
 Here is my MEMORY.md — please read it and continue from exactly where we left off.
-Do not suggest different tools, structure, or approaches than what's documented here.
 
 [paste the contents of this file]
 
@@ -143,4 +218,4 @@ Today I want to: [describe what you want to do]
 ```
 
 ---
-_Last updated: 2026-08-19_
+_Last updated: 2026-08-22_
